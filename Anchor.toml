@@ -1,0 +1,15 @@
+[features]
+seeds = false
+skip-lint = false
+[programs.devnet]
+liquidity_pool = "GPyMAqy5mDHXHmpvFEN7sJyhLu8upoYr57ADhzeeoJ8s"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "/Users/usamaali/Desktop/Workspace/testProjects/TeKnfk7V3czXB17nexc5bzqa4hQyv6hTQwgdnJhSQuy.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
