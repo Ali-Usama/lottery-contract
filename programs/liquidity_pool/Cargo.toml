@@ -17,3 +17,5 @@ default = []
 
 [dependencies]
 anchor-lang = "0.26.0"
+sha3 = "0.10.1"
+arrayref = "0.3.5"

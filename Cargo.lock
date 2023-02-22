@@ -865,6 +865,8 @@ name = "liquidity_pool"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "arrayref",
+ "sha3",
 ]
 
 [[package]]

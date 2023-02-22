@@ -1,12 +1,16 @@
 use anchor_lang::prelude::*;
-use std::convert::TryInto;
+use std::{convert::TryInto};
+use arrayref::array_ref;
+use anchor_lang::solana_program::sysvar;
 
 declare_id!("GPyMAqy5mDHXHmpvFEN7sJyhLu8upoYr57ADhzeeoJ8s");
 
 
 #[program]
-mod liquidity_pool {
+pub mod liquidity_pool {
     use anchor_lang::solana_program::entrypoint::ProgramResult;
+    use anchor_lang::solana_program::program::{invoke, invoke_signed};
+    use anchor_lang::solana_program::{system_instruction};
     use super::*;
 
     pub fn new_lottery(
@@ -33,10 +37,10 @@ mod liquidity_pool {
         let lottery = &mut ctx.accounts.lottery;
         let participant = &ctx.accounts.participant.to_account_info().key;
         if amount != lottery.pool_value {
-            return Err("Value should be 0.1 SOL".into());
+            return Err(ProgramError::InsufficientFunds);
         }
         if lottery.participants.contains(participant) {
-            return Err("User already a participant".into());
+            return Err(ProgramError::AccountAlreadyInitialized);
         }
         lottery.participants.push(**participant);
         lottery.total_amount += amount;
@@ -45,54 +49,55 @@ mod liquidity_pool {
 
     pub fn pick_winner(ctx: Context<PickWinner>) -> ProgramResult {
         let lottery = &mut ctx.accounts.lottery;
+        // Ensure there are participants in the lottery
         if lottery.participants.is_empty() {
-            return Err("No participant".into());
+            return Err(ProgramError::InvalidArgument);
         }
-        let index = (lottery.random() % lottery.participants.len() as u64) as usize;
-        let winner_address = lottery.participants[index];
-        let winner_prize = lottery.total_amount * lottery.winner_prize / 100;
-        let owner_prize = lottery.total_amount * lottery.owner_prize / 100;
-        ctx.accounts
-            .winner
-            .to_account_info()
-            .try_borrow_mut_lamports()?;
-        ctx.accounts.owner.try_borrow_mut_lamports()?;
-        **ctx.accounts.winner.to_account_info().lamports.borrow_mut() -= winner_prize;
-        **ctx.accounts.owner.lamports.borrow_mut() -= owner_prize;
-        **ctx.accounts
-            .winner
-            .to_account_info()
-            .lamports
-            .borrow_mut() += winner_prize + owner_prize;
-        lottery.winner = Some(winner_address);
-        lottery.participants.clear();
+
+        // Generate a random index to select the winner
+        let recent_slothashes = &ctx.accounts.recent_slothashes;
+        let data = recent_slothashes.data.borrow();
+        let most_recent = array_ref![data, 12, 8];
+
+        let clock = Clock::get()?;
+        // seed for the random number is a combination of the slot_hash - timestamp
+        let seed = u64::from_le_bytes(*most_recent).saturating_sub(clock.unix_timestamp as u64);
+
+        let index = (seed % lottery.participants.len() as u64) as usize;
+        // Get the winner's address
+        let winner_address = ctx.accounts.lottery.participants[index];
+
+        // Calculate the winner and owner prizes
+        let winner_prize = (ctx.accounts.lottery.total_amount * ctx.accounts.lottery.winner_prize)
+            / 100;
+        let owner_prize =
+            (ctx.accounts.lottery.total_amount * ctx.accounts.lottery.owner_prize) / 100;
+
+        // Transfer the winner's prize to their account
+        let ix = system_instruction::transfer(
+            &ctx.accounts.lottery.owner.key(),
+            &ctx.accounts.winner.key,
+            winner_prize,
+        );
+        let signers = &[&ctx.accounts.owner];
+        let program = ctx.accounts.system_program.to_account_info().clone();
+        let (address, _) = Pubkey::find_program_address(&[b"winner_prize".as_ref()], ctx.program_id);
+        let accounts = &[ctx.accounts.lottery.to_account_info(), ctx.accounts.winner.to_account_info(), program];
+        invoke_signed(&ix, accounts, &[&[b"winner_prize".as_ref(), &[0u8]]])?;
+
+        // Transfer the owner's prize to their account
+        let ix = system_instruction::transfer(
+            &ctx.accounts.lottery.owner.key(),
+            &ctx.accounts.owner.key,
+            owner_prize,
+        );
+        invoke(&ix, accounts)?;
+
+        // Set the winner and clear the participants list
+        ctx.accounts.lottery.winner = Some(winner_address);
+        ctx.accounts.lottery.participants.clear();
+
         Ok(())
-    }
-
-    #[derive(Accounts)]
-    pub struct NewPool<'info> {
-        #[account(init, payer = owner)]
-        pub lottery: Account<'info, Pool>,
-        pub owner: AccountInfo<'info>,
-        pub rent: Sysvar<'info, Rent>,
-    }
-
-    #[derive(Accounts)]
-    pub struct JoinPool<'info> {
-        #[account(mut)]
-        pub lottery: Account<'info, Pool>,
-        #[account(signer)]
-        pub participant: AccountInfo<'info>,
-    }
-
-    #[derive(Accounts)]
-    pub struct PickWinner<'info> {
-        #[account(mut)]
-        pub lottery: Account<'info, Pool>,
-        #[account(signer)]
-        pub owner: AccountInfo<'info>,
-        #[account(mut)]
-        pub winner: AccountInfo<'info>,
     }
 }
 
@@ -105,6 +110,47 @@ pub struct Pool {
     pub owner_prize: u64,
     pub participants: Vec<Pubkey>,
     pub winner: Option<Pubkey>,
+}
+
+#[derive(Accounts)]
+pub struct NewPool<'info> {
+    #[account(init, payer = owner, space = 8 + 32 + 64)]
+    pub lottery: Account<'info, Pool>,
+
+    /// CHECK: account is test account
+    #[account(mut)]
+    pub owner: AccountInfo<'info>,
+    pub rent: Sysvar<'info, Rent>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct JoinPool<'info> {
+    #[account(mut)]
+    pub lottery: Account<'info, Pool>,
+
+    /// CHECK: test participants
+    #[account(signer)]
+    pub participant: AccountInfo<'info>,
+
+}
+
+#[derive(Accounts)]
+pub struct PickWinner<'info> {
+    #[account(mut)]
+    pub lottery: Account<'info, Pool>,
+
+    /// CHECK: test owner
+    #[account(signer)]
+    pub owner: AccountInfo<'info>,
+
+    /// CHECK: winner account
+    #[account(mut)]
+    pub winner: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+    /// CHECK: account constraints checked in account trait
+    #[account(address = sysvar::slot_hashes::id())]
+    recent_slothashes: UncheckedAccount<'info>,
 }
 
 
